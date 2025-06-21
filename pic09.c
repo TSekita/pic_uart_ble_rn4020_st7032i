@@ -39,19 +39,10 @@
 
 #include <xc.h>
 #include <stdint.h>
-#include <stdbool.h>
 
 #define _XTAL_FREQ 32000000  // Internal oscillator Hz
 #define BaudRate 115200      // bps
 #define ST7032i_ADDR 0x7C    // ST7032i slave address is 0x7C
-#define MAX_LCD_CHAR 16      // Maximum characters displayable on LCD (e.g., 8x2)
-
-volatile char uart_buffer[MAX_LCD_CHAR + 1];
-volatile uint8_t uart_index = 0;
-
-void LCD_Data(uint8_t data);
-void LCD_Command(uint8_t cmd);
-void UART_SendString(const char *str);
 
 void UART_Init(void) {
     TRISCbits.TRISC6 = 1; // TX output
@@ -59,7 +50,7 @@ void UART_Init(void) {
     ANSELCbits.ANSC6 = 0; // TX digital
     ANSELCbits.ANSC7 = 0; // RX digital
 
-    TX1STAbits.BRGH = 1;   // High speed
+    TX1STAbits.BRGH = 1; // High speed
     BAUD1CONbits.BRG16 = 1; // 16-bit baud rate
 
     uint16_t SP1BRG = (_XTAL_FREQ / (4 * BaudRate)) - 1;
@@ -72,32 +63,26 @@ void UART_Init(void) {
     PPSLOCKbits.PPSLOCKED = 0; // Unlock PPS
 
     RC6PPS = 0x10; // TX
-    RXPPS = 0x17;  // RX
+    RXPPS = 0x17; // RX
 
     PPSLOCK = 0x55;
     PPSLOCK = 0xAA;
     PPSLOCKbits.PPSLOCKED = 1; // Lock PPS
 
-    TX1STAbits.SYNC = 0;  // Asynchronous mode
-    RC1STAbits.SPEN = 1;  // Enable serial port
-    TX1STAbits.TXEN = 1;  // Enable transmission
-    RC1STAbits.CREN = 1;  // Enable continuous receive
+    TX1STAbits.SYNC = 0; // Asynchronous mode
+    RC1STAbits.SPEN = 1; // Enable serial port
+    TX1STAbits.TXEN = 1; // Enable transmission
+    RC1STAbits.CREN = 1; // Enable continuous receive
     TX1STAbits.TX9 = 0;
-    RC1STAbits.RX9 = 0;   // 8-bit receive (standard)
-}
+    RC1STAbits.RX9 = 0; // 8-bit receive (standard)
 
-void __interrupt() isr(void) {
-    if (RC1STAbits.OERR) { // Overrun error check
-        RC1STAbits.CREN = 0;
-        RC1STAbits.CREN = 1;
-        return;
-    }
-    LATAbits.LATA0 ^= 1;
-    char c = RC1REG; // Clear interrupt flag
+    PIE3bits.RCIE = 1; 
+    INTCONbits.PEIE = 1;
+    INTCONbits.GIE = 1;     
 }
 
 void UART_SendChar(char c) {
-    while (!PIR3bits.TXIF); // Wait for transmit buffer to be empty
+    while (!TRMT); // Wait for transmit buffer to be empty
     TX1REG = c;
 }
 
@@ -105,13 +90,6 @@ void UART_SendString(const char *str) {
     while (*str) {
         UART_SendChar(*str++);
     }
-    __delay_ms(1);
-}
-
-void UART_EnableInterrupt(void) {
-    PIE3bits.RCIE = 1;   // Enable receive interrupt
-    INTCONbits.PEIE = 1; // Enable peripheral interrupt
-    INTCONbits.GIE = 1;  // Enable global interrupt
 }
 
 void BLE_SendCmd(const char *cmd) {
@@ -119,19 +97,23 @@ void BLE_SendCmd(const char *cmd) {
     UART_SendString("\r\n");
 }
 
+char uart_getc(void) {
+    if ((RC1STAbits.OERR) || (RC1STAbits.FERR)) {
+        RC1STA = 0;
+        RC1STA = 0x90;
+        return '\0';
+    }
+    return RC1REG; 
+}
+
 void BLE_Init(void) {
     __delay_ms(100);
     BLE_SendCmd("SF,1");
     __delay_ms(100);
-    BLE_SendCmd("SS,C0000000"); // Enable MLDP and Device Info
-    BLE_SendCmd("SR,3C000000"); // Support MLDP + Auto-enter MLDP
-    BLE_SendCmd("SN,MyBLE");
+    BLE_SendCmd("SS,80000000"); // Enable MLDP and Device Info
+    BLE_SendCmd("SR,32000800"); // Support MLDP + Auto-enter MLDP
+    BLE_SendCmd("SN,Mr.BLE");
     BLE_SendCmd("R,1"); // Reset module
-}
-
-void BLE_StartAdvertising(void) {
-    __delay_ms(1000);    // Wait for RN4020 to stabilize after reset
-    BLE_SendCmd("A");    // Start advertising
 }
 
 // I2C initialization
@@ -152,36 +134,41 @@ void I2C1_Init(void) {
     // Configure MSSP module as I2C Master, 400kHz
     SSP1CON1 = 0x28; // I2C master mode
     SSP1CON2 = 0x00;
-    SSP1ADD = (_XTAL_FREQ / (4 * 400000)) - 1;
+    SSP1CON3 = 0x00;
+    SSP1ADD = (_XTAL_FREQ / (4 * 100000)) - 1;
 }
 
 // Send I2C start condition
 
 void I2C1_Start(void) {
+    SSP1IF = 0;
     SSP1CON2bits.SEN = 1;
-    while (SSP1CON2bits.SEN);
+    while (SSP1IF == 0) {
+    }
+    SSP1IF = 0;
+    return;
 }
 
 // Send I2C stop condition
 
 void I2C1_Stop(void) {
+    SSP1IF = 0;
     SSP1CON2bits.PEN = 1;
-    while (SSP1CON2bits.PEN);
+    while (SSP1IF == 0) {
+    }
+    SSP1IF = 0;
+    return;
 }
 
 // Send one byte over I2C
 
-bool I2C1_Write(uint8_t data) {
+void I2C1_Write(uint8_t data) {
+    SSP1IF = 0;
     SSP1BUF = data;
-
-    while (SSP1STATbits.BF); // Wait for buffer to be cleared
-
-    // Check ACKSTAT: 0 = ACK received, 1 = NACK received
-    if (SSP1CON2bits.ACKSTAT) {
-        return false; // NACK received (slave did not accept data)
+    while (SSP1IF == 0) {
     }
-
-    return true; // Success
+    SSP1IF = 0;
+    return;
 }
 
 // Send command to ST7032i
@@ -209,25 +196,18 @@ void LCD_Data(uint8_t data) {
 // Initialize ST7032i LCD
 
 void ST7032i_Init(void) {
-    __delay_ms(100); // Wait for LCD power-up
+    __delay_ms(50); // Wait for LCD power-up
 
     LCD_Command(0x38); // Function set: 8-bit, 2-line, normal instruction
-    __delay_ms(1);
     LCD_Command(0x39); // Function set: extended instruction
-    __delay_ms(1);
     LCD_Command(0x14); // Internal OSC frequency
-    __delay_ms(1);
     LCD_Command(0x70); // Contrast set low byte
-    __delay_ms(1);
     LCD_Command(0x56); // Power/Icon/Contrast high byte
-    __delay_ms(1);
     LCD_Command(0x6C); // Follower control
-    __delay_ms(250); // Wait for voltage to stabilize
+    __delay_ms(200); // Wait for voltage stable
 
     LCD_Command(0x38); // Function set: normal instruction
-    __delay_ms(1);
     LCD_Command(0x0C); // Display ON, Cursor OFF, Blink OFF
-    __delay_ms(1);
     LCD_Command(0x01); // Clear display
     __delay_ms(2); // Wait for clear display
 }
@@ -240,25 +220,38 @@ void LCD_Print(const char *str) {
     }
 }
 
+void __interrupt() isr(void) {
+    if (PIR3bits.RCIF) {
+        char c = RC1REG;
+//        if (c == '\0' || c == '\r' || c == '\n') continue;
+        if (c == '1') {
+            LATAbits.LATA0 = 1;
+        } else if (c == '0') {
+            LATAbits.LATA0 = 0;
+        }
+    }
+}
+
 void main(void) {
     TRISAbits.TRISA0 = 0; // Set RA0 as output
-    LATAbits.LATA0 = 0;   // Initial state Low
+    ANSELAbits.ANSA0 = 0;
+    LATAbits.LATA0 = 0; // Initial state Low
 
-    UART_Init();
-    __delay_ms(500);
-    UART_SendString("READY\r\n");
-    UART_EnableInterrupt();
+//    UART_Init();
+//    __delay_ms(500);
     I2C1_Init();
     __delay_ms(200);
-
+//    BLE_Init();
+//    __delay_ms(200);
     ST7032i_Init();
     __delay_ms(200);
 
     LCD_Command(0x02);
-    LCD_Command(0x75);
-    LCD_Print("Hello");
+    LCD_Data('H');
+    LCD_Command(0xC0); // Move to 2nd line (0x40 address)
+    LCD_Data('W');
+    __delay_ms(1000);
 
     while (1) {
-        // Infinite loop
     }
 }
