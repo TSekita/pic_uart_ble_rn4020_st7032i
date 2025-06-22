@@ -44,6 +44,11 @@
 #define BaudRate 115200      // bps
 #define ST7032i_ADDR 0x7C    // ST7032i slave address is 0x7C
 
+#define BUFFER_SIZE 16
+volatile char rx_buffer[BUFFER_SIZE];
+volatile uint8_t rx_index = 0;
+volatile uint8_t data_ready = 0;
+
 void UART_Init(void) {
     TRISCbits.TRISC6 = 1; // TX output
     TRISCbits.TRISC7 = 1; // RX input
@@ -76,9 +81,9 @@ void UART_Init(void) {
     TX1STAbits.TX9 = 0;
     RC1STAbits.RX9 = 0; // 8-bit receive (standard)
 
-    PIE3bits.RCIE = 1; 
+    PIE3bits.RCIE = 1;
     INTCONbits.PEIE = 1;
-    INTCONbits.GIE = 1;     
+    INTCONbits.GIE = 1;
 }
 
 void UART_SendChar(char c) {
@@ -103,7 +108,7 @@ char uart_getc(void) {
         RC1STA = 0x90;
         return '\0';
     }
-    return RC1REG; 
+    return RC1REG;
 }
 
 void BLE_Init(void) {
@@ -223,11 +228,15 @@ void LCD_Print(const char *str) {
 void __interrupt() isr(void) {
     if (PIR3bits.RCIF) {
         char c = RC1REG;
-//        if (c == '\0' || c == '\r' || c == '\n') continue;
-        if (c == '1') {
-            LATAbits.LATA0 = 1;
-        } else if (c == '0') {
-            LATAbits.LATA0 = 0;
+        if (rx_index < BUFFER_SIZE - 1) {
+            rx_buffer[rx_index++] = c;
+            if (c == '\n') {
+                rx_buffer[rx_index] = '\0';
+                data_ready = 1;
+                rx_index = 0;
+            }
+        } else {
+            rx_index = 0;
         }
     }
 }
@@ -237,21 +246,28 @@ void main(void) {
     ANSELAbits.ANSA0 = 0;
     LATAbits.LATA0 = 0; // Initial state Low
 
-//    UART_Init();
-//    __delay_ms(500);
     I2C1_Init();
     __delay_ms(200);
-//    BLE_Init();
-//    __delay_ms(200);
     ST7032i_Init();
     __delay_ms(200);
 
     LCD_Command(0x02);
-    LCD_Data('H');
+    LCD_Print("Display");
     LCD_Command(0xC0); // Move to 2nd line (0x40 address)
-    LCD_Data('W');
+    LCD_Print("Ready");
     __delay_ms(1000);
 
+    UART_Init();
+    __delay_ms(500);
+    BLE_Init();
+    __delay_ms(200);
     while (1) {
+        if (data_ready) {
+            LCD_Command(0x01); // Clear display
+            __delay_ms(2);
+            LCD_Command(0x02); // Return home
+            LCD_Print((const char *) rx_buffer);
+            data_ready = 0;
+        }
     }
 }
