@@ -39,6 +39,8 @@
 
 #include <xc.h>
 #include <stdint.h>
+#include <stdbool.h>
+#include <pic16f18857.h>
 
 #define _XTAL_FREQ 32000000  // Internal oscillator Hz
 #define BaudRate 115200      // bps
@@ -48,6 +50,9 @@
 volatile char rx_buffer[BUFFER_SIZE];
 volatile uint8_t rx_index = 0;
 volatile uint8_t data_ready = 0;
+volatile bool button_pressed = false;
+volatile bool advertised = false;
+volatile uint8_t overflow_count = 0;
 
 void UART_Init(void) {
     TRISCbits.TRISC6 = 1; // TX output
@@ -82,8 +87,6 @@ void UART_Init(void) {
     RC1STAbits.RX9 = 0; // 8-bit receive (standard)
 
     PIE3bits.RCIE = 1;
-    INTCONbits.PEIE = 1;
-    INTCONbits.GIE = 1;
 }
 
 void UART_SendChar(char c) {
@@ -116,7 +119,8 @@ void BLE_Init(void) {
     BLE_SendCmd("SF,1");
     __delay_ms(100);
     BLE_SendCmd("SS,80000000"); // Enable MLDP and Device Info
-    BLE_SendCmd("SR,32000800"); // Support MLDP + Auto-enter MLDP
+    //    BLE_SendCmd("SR,32000800"); // Support MLDP + Auto Advertise + UART Flow Control + Auto-enter MLDP
+    BLE_SendCmd("SR,12000800"); // Support MLDP + UART Flow Control + Auto-enter MLDP
     BLE_SendCmd("SN,Mr.BLE");
     BLE_SendCmd("R,1"); // Reset module
 }
@@ -225,6 +229,24 @@ void LCD_Print(const char *str) {
     }
 }
 
+void timer1_init(void) {
+    T1CON = 0x31; // Fosc/4, 1:8プリスケーラ
+    T1CLK = 0x01;
+    TMR1H = 0x3C;
+    TMR1L = 0xAF;
+}
+
+void ioc_init(void) {
+    TRISA2 = 1; // RA2入力
+    ANSA2 = 0; // デジタル入力
+
+    IOCAN2 = 1; // 負論理（立下がり）
+    IOCAP2 = 1; // 正論理（立ち上がり）
+    IOCAF2 = 0;
+    PIE0bits.IOCIE = 1;
+    PIR0bits.IOCIF = 0;
+}
+
 void __interrupt() isr(void) {
     if (PIR3bits.RCIF) {
         char c = RC1REG;
@@ -237,6 +259,40 @@ void __interrupt() isr(void) {
             }
         } else {
             rx_index = 0;
+        }
+    }
+    if (PIR0bits.IOCIF) {
+//        __delay_ms(20); // 簡易チャタリング防止
+        if (PORTAbits.RA2 == 0) {
+            // ボタン押下開始
+            button_pressed = true;
+            overflow_count = 0;
+            advertised = false;
+
+            TMR1H = 0x3C;
+            TMR1L = 0xAF;
+            PIE4bits.TMR1IE = 1;
+            PIR4bits.TMR1IF = 0;
+            T1CONbits.TMR1ON = 1;
+        } else {
+            // ボタン離し
+            button_pressed = false;
+            T1CONbits.TMR1ON = 0;
+            PIE4bits.TMR1IE = 0;
+        }
+        IOCAF2 = 0;
+        PIR0bits.IOCIF = 0;
+    }
+    if (PIR4bits.TMR1IF) {
+        PIR4bits.TMR1IF = 0;
+        if (button_pressed && !advertised) {
+            overflow_count++;
+            if (overflow_count >= 100) {
+                BLE_SendCmd("A,0064,EA60"); // RN4020 のアドバタイズ開始コマンド例
+                advertised = true;
+                T1CONbits.TMR1ON = 0;
+                PIE4bits.TMR1IE = 0;
+            }
         }
     }
 }
@@ -259,6 +315,12 @@ void main(void) {
 
     UART_Init();
     __delay_ms(500);
+    timer1_init();
+    ioc_init();
+
+    INTCONbits.PEIE = 1;
+    INTCONbits.GIE = 1;
+
     BLE_Init();
     __delay_ms(200);
     while (1) {
